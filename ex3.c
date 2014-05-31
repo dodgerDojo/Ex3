@@ -20,7 +20,7 @@
 
 // Defines:
 
-#define FIFO_NAME           ("ex3FIFO‬‬")
+#define FIFO_NAME           ("ex3FIFO")
 
 #define OPEN_ERROR          ("open() failed.\n")
 #define MKFIFO_ERROR        ("mkfifo() failed.\n")
@@ -81,7 +81,7 @@ static void initSigactions(void)
     // Establish the SIGUSR1 signal handler.
     usrAction.sa_sigaction = sigusr1Handler;
     usrAction.sa_mask = blockMask;
-    usrAction.sa_flags = 0;
+    usrAction.sa_flags = SA_SIGINFO;
     if(sigaction(SIGUSR1, &usrAction, NULL) < 0)
     {
         // No checking needed, exits with error code.
@@ -105,6 +105,9 @@ static void deleteFifo(void)
         write(STDERR_FILENO, UNLINK_ERROR, sizeof(UNLINK_ERROR));
         exit(EXIT_ERROR_CODE);
     }
+
+    printf("deleted.");
+    fflush(stdout);
 }
 /********************************/
 
@@ -118,7 +121,7 @@ int main(int argc, char *argv[])
     initSigactions();
 
     // Create fifo.
-    if(mkfifo(FIFO_NAME, 0777) < 0)
+    if(mkfifo(FIFO_NAME, 0666) < 0)
     {
         perror("mkfifo()");
         // No checking needed, exits with error code.
@@ -126,13 +129,12 @@ int main(int argc, char *argv[])
         exit(EXIT_ERROR_CODE);
     }
 
-    sleep(1);
-
     // Get self PID.
     my_pid = getpid();
 
     // Open FIFO.
     fifo_fd = open(FIFO_NAME, O_WRONLY);
+
     if(fifo_fd < 0)
     {
         perror("open()");
@@ -142,7 +144,7 @@ int main(int argc, char *argv[])
         exit(EXIT_ERROR_CODE);
     }
 
-    if(write(fifo_fd, (void*)&my_pid, sizeof(my_pid)))
+    if(write(fifo_fd, (void*)&my_pid, sizeof(my_pid)) != sizeof(my_pid))
     {
         perror("write()");
         // No checking needed, exits with error code.
@@ -158,15 +160,12 @@ int main(int argc, char *argv[])
         exit(EXIT_ERROR_CODE);
     }
 
-    printf("hey4!");
-    fflush(stdout);
+    deleteFifo();
 
     waitForSignal();
 
-    deleteFifo();
-
     printf("got signal from %d!\n", Queue_Pid);
-    fflush(stdout);
+
     //createSharedMemory();
 
     //createBinarySemaphore();
