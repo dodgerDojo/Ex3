@@ -45,6 +45,7 @@
 #define SHMGET_ERROR        ("shmget() failed.\n")
 #define SHMAT_ERROR         ("shmat() failed.\n")
 #define SEMGET_ERROR        ("shmget() failed.\n")
+#define SHMCTL_ERROR        ("shmctl() failed.\n")
 #define SEMCTL_ERROR        ("semctl() failed.\n")
 #define KILL_ERROR          ("kill() failed.\n")
 
@@ -80,10 +81,13 @@ static void waitForSignal(void);
 static void deleteFifo(void);
 static void writePidToFifo(void);
 
-static key_t createSharedMemory(const char *key_file_name);
-static void createBinarySemaphore(key_t sem_key);
+static void createSharedMemory(const char *key_file_name, key_t *key, int *shm_id);
+static int createBinarySemaphore(key_t sem_key);
 
 static int readQueueLengthFromFifo(void);
+
+static void deleteSharedMemory(int shm_id);
+static void deleteResources(int shm_id, int sem_id);
 
 /********************************/
 
@@ -183,17 +187,16 @@ static void writePidToFifo(void)
     }
 }
 
-static key_t createSharedMemory(const char *key_file_name)
+static void createSharedMemory(const char *key_file_name, key_t *key, int *shm_id)
 {
     const unsigned char KEY_CHAR = 'H';
     const unsigned int SHM_SIZE_IN_BYTES = 1024;
 
-    int shm_id = 0;
     char *p_shm_data = NULL;
 
     // Generate key from the given file
-    key_t shm_key = ftok(key_file_name, KEY_CHAR);
-    if(shm_key < 0)
+    *key = ftok(key_file_name, KEY_CHAR);
+    if(*key < 0)
     {
         deleteFifo();
         // No checking needed, exits with error code.
@@ -202,8 +205,8 @@ static key_t createSharedMemory(const char *key_file_name)
     }
 
     // Create shared memory
-    shm_id = shmget(shm_key, SHM_SIZE_IN_BYTES, IPC_CREAT|ALLOW_READ_WRITE_TO_ALL);
-    if(shm_id < 0)
+    *shm_id = shmget(*key, SHM_SIZE_IN_BYTES, IPC_CREAT|ALLOW_READ_WRITE_TO_ALL);
+    if(*shm_id < 0)
     {
         deleteFifo();
         // No checking needed, exits with error code.
@@ -212,19 +215,18 @@ static key_t createSharedMemory(const char *key_file_name)
     }
 
     // Connect to the shared memory.
-    p_shm_data = (char *)shmat(shm_id, 0, 0);
+    p_shm_data = (char *)shmat(*shm_id, 0, 0);
     if(SHMAT_FAILED == p_shm_data)
     {
         deleteFifo();
+        deleteSharedMemory(*shm_id);
         // No checking needed, exits with error code.
         write(STDERR_FILENO, SHMAT_ERROR, sizeof(SHMAT_ERROR));
         exit(EXIT_ERROR_CODE);      
     }
-
-    return shm_key;
 }
 
-static void createBinarySemaphore(key_t sem_key)
+static int createBinarySemaphore(key_t sem_key)
 {
     union semun sem_conf;
 
@@ -245,6 +247,8 @@ static void createBinarySemaphore(key_t sem_key)
         write(STDERR_FILENO, SEMCTL_ERROR, sizeof(SEMCTL_ERROR));
         exit(EXIT_ERROR_CODE);   
     }
+
+    return sem_id;
 }
 
 static int readQueueLengthFromFifo(void)
@@ -280,6 +284,30 @@ static int readQueueLengthFromFifo(void)
 
     return queue_length;
 }
+
+static void deleteSharedMemory(int shm_id)
+{
+    if(shmctl(shm_id, IPC_RMID, 0) < 0)
+    {
+        // No checking needed, exits with error code.
+        write(STDERR_FILENO, SHMCTL_ERROR, sizeof(SHMCTL_ERROR));
+        exit(EXIT_ERROR_CODE);
+    }
+}
+
+static void deleteResources(int shm_id, int sem_id)
+{
+    union semun ignored_arg;
+
+    deleteSharedMemory(shm_id);
+
+    if(semctl(sem_id, NUM_OF_SEMAPHORES, IPC_RMID, ignored_arg) < 0)
+    {
+        // No checking needed, exits with error code.
+        write(STDERR_FILENO, SEMCTL_ERROR, sizeof(SEMCTL_ERROR));
+        exit(EXIT_ERROR_CODE);
+    }
+}
 /********************************/
 
 // Main:
@@ -290,7 +318,7 @@ int main(int argc, char *argv[])
     const unsigned int KEY_FILE_ARG_INDEX = 1;
 
     key_t key = 0;
-    int queue_length = 0;
+    int queue_length = 0, shm_id = 0, sem_id = 0;
 
     initSigactions();
 
@@ -317,10 +345,10 @@ int main(int argc, char *argv[])
     printf("got signal from %d!\n", Queue_Pid);
 
     // Create shared memory.
-    key = createSharedMemory(argv[KEY_FILE_ARG_INDEX]);
+    createSharedMemory(argv[KEY_FILE_ARG_INDEX], &key, &shm_id);
 
     // Create semaphore.
-    createBinarySemaphore(key);
+    sem_id = createBinarySemaphore(key);
 
     // Notify the queue.out process.
     if(kill(Queue_Pid, SIGUSR1) < 0)
@@ -338,8 +366,10 @@ int main(int argc, char *argv[])
     // Done using the fifo - delete it.
     deleteFifo();
 
-    //signalSigusr1ToProcess(proc_pid);
-    //queue_length = readFromFifo();
+    // Game Started!
+
+    deleteResources(shm_id, sem_id);
+
 
     return EXIT_OK_CODE;
 }
