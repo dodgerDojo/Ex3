@@ -85,8 +85,8 @@ static void waitForSignal(void);
 static void deleteFifo(void);
 static void writePidToFifo(void);
 
-char *createSharedMemory(const char *key_file_name, key_t *key, int *shm_id);
-static int createBinarySemaphore(key_t sem_key);
+char *createSharedMemory(key_t key, int *shm_id);
+static int createBinarySemaphore(key_t sem_key, int shm_id);
 
 static int readQueueLengthFromFifo(void);
 
@@ -155,7 +155,7 @@ static void deleteFifo(void)
         exit(EXIT_ERROR_CODE);
     }
 
-    printf("deleted.");
+    printf("deleted.\n");
     fflush(stdout);
 }
 
@@ -196,24 +196,12 @@ static void writePidToFifo(void)
     }
 }
 
-char *createSharedMemory(const char *key_file_name, key_t *key, int *shm_id)
+char *createSharedMemory(key_t key, int *shm_id)
 {
-    const unsigned char KEY_CHAR = 'H';
-
     char *p_shm_data = NULL;
 
-    // Generate key from the given file
-    *key = ftok(key_file_name, KEY_CHAR);
-    if(*key < 0)
-    {
-        deleteFifo();
-        // No checking needed, exits with error code.
-        write(STDERR_FILENO, FTOK_ERROR, sizeof(FTOK_ERROR));
-        exit(EXIT_ERROR_CODE);       
-    }
-
     // Create shared memory
-    *shm_id = shmget(*key, SHM_SIZE_IN_BYTES, IPC_CREAT|ALLOW_READ_WRITE_TO_ALL);
+    *shm_id = shmget(key, SHM_SIZE_IN_BYTES, IPC_CREAT|ALLOW_READ_WRITE_TO_ALL);
     if(*shm_id < 0)
     {
         deleteFifo();
@@ -236,7 +224,7 @@ char *createSharedMemory(const char *key_file_name, key_t *key, int *shm_id)
     return p_shm_data;
 }
 
-static int createBinarySemaphore(key_t sem_key)
+static int createBinarySemaphore(key_t sem_key, int shm_id)
 {
     union semun sem_conf;
 
@@ -244,6 +232,7 @@ static int createBinarySemaphore(key_t sem_key)
     if(sem_id < 0)
     {
         deleteFifo();
+        deleteSharedMemory(shm_id);
         // No checking needed, exits with error code.
         write(STDERR_FILENO, SEMGET_ERROR, sizeof(SEMGET_ERROR));
         exit(EXIT_ERROR_CODE);         
@@ -253,6 +242,7 @@ static int createBinarySemaphore(key_t sem_key)
     if(semctl(sem_id, 0, SETVAL, sem_conf) < 0)
     {
         deleteFifo();
+        deleteResources(shm_id, sem_id);
         // No checking needed, exits with error code.
         write(STDERR_FILENO, SEMCTL_ERROR, sizeof(SEMCTL_ERROR));
         exit(EXIT_ERROR_CODE);   
@@ -303,6 +293,8 @@ static void deleteSharedMemory(int shm_id)
         write(STDERR_FILENO, SHMCTL_ERROR, sizeof(SHMCTL_ERROR));
         exit(EXIT_ERROR_CODE);
     }
+
+    printf("shared memory deleted.\n");
 }
 
 static void deleteResources(int shm_id, int sem_id)
@@ -317,6 +309,8 @@ static void deleteResources(int shm_id, int sem_id)
         write(STDERR_FILENO, SEMCTL_ERROR, sizeof(SEMCTL_ERROR));
         exit(EXIT_ERROR_CODE);
     }
+
+    printf("semaphore deleted.\n");
 }
 
 static void semLock(int sem_id, int shm_id)
@@ -359,13 +353,17 @@ static void semUnlock(int sem_id, int shm_id)
 
 static void handleGame(int shm_id, char *shm_addr, int sem_id, int queue_size)
 {
-    char game_ended = 0;
+    unsigned int game_counter = 0;
 
     char old_image[SHM_SIZE_IN_BYTES] = {0};
     char current_image[SHM_SIZE_IN_BYTES] = {0};
 
-    while(!game_ended)
+    char *p_element = NULL;
+
+    while(1)
     {
+        const char REJECT[] = "reject";
+
         semLock(sem_id, shm_id);
 
         // Read the shared memory data.
@@ -378,14 +376,24 @@ static void handleGame(int shm_id, char *shm_addr, int sem_id, int queue_size)
             continue;
         }
 
-        // Otherwise, fetch the data.
-        printf("%s", current_image);
-        fflush(stdout);
+        printf("current: %s\n", current_image);
 
-        // Update the old image.
-        memcpy((void *)old_image, (void *)current_image, SHM_SIZE_IN_BYTES);
+        memcpy(current_image, REJECT, sizeof(REJECT));
+
+        // write to memory
+        memcpy((void *)shm_addr, (void *)current_image, SHM_SIZE_IN_BYTES);
 
         semUnlock(sem_id, shm_id);
+
+        game_counter++;
+
+        if(game_counter > 10)
+        {
+            break;
+        }
+
+        // Update the old image.
+        memcpy((void *)old_image, (void *)shm_addr, SHM_SIZE_IN_BYTES);
     }
 }
 
@@ -397,6 +405,7 @@ int main(int argc, char *argv[])
 {
     const unsigned int EXPECTED_ARGC = 2;
     const unsigned int KEY_FILE_ARG_INDEX = 1;
+    const unsigned char KEY_CHAR = 'H';
 
     key_t key = 0;
     char *shm_addr = NULL;
@@ -426,11 +435,22 @@ int main(int argc, char *argv[])
 
     printf("got signal from %d!\n", Queue_Pid);
 
+    // Generate key from the given file
+    key = ftok(argv[KEY_FILE_ARG_INDEX], KEY_CHAR);
+
+    if(key < 0)
+    {
+        deleteFifo();
+        // No checking needed, exits with error code.
+        write(STDERR_FILENO, FTOK_ERROR, sizeof(FTOK_ERROR));
+        exit(EXIT_ERROR_CODE);       
+    }
+
     // Create shared memory.
-    shm_addr = createSharedMemory(argv[KEY_FILE_ARG_INDEX], &key, &shm_id);
+    shm_addr = createSharedMemory(key, &shm_id);
 
     // Create semaphore.
-    sem_id = createBinarySemaphore(key);
+    sem_id = createBinarySemaphore(key, shm_id);
 
     // Notify the queue.out process.
     if(kill(Queue_Pid, SIGUSR1) < 0)
