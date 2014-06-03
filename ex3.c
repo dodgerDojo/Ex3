@@ -18,6 +18,7 @@
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <sys/sem.h>
+#include <string.h>
 
 /********************************/
 
@@ -26,6 +27,8 @@
 #define FIFO_NAME           ("ex3FIFO")
 
 #define ALLOW_READ_WRITE_TO_ALL (0666)
+
+#define SHM_SIZE_IN_BYTES       (1024)
 
 #define SHMAT_FAILED        ((void *)-1)
 
@@ -48,6 +51,7 @@
 #define SHMCTL_ERROR        ("shmctl() failed.\n")
 #define SEMCTL_ERROR        ("semctl() failed.\n")
 #define KILL_ERROR          ("kill() failed.\n")
+#define SEMOP_ERROR         ("semop() failed.\n")
 
 #define EXIT_ERROR_CODE     (-1)
 #define EXIT_OK_CODE        (0)
@@ -81,13 +85,18 @@ static void waitForSignal(void);
 static void deleteFifo(void);
 static void writePidToFifo(void);
 
-static void createSharedMemory(const char *key_file_name, key_t *key, int *shm_id);
+char *createSharedMemory(const char *key_file_name, key_t *key, int *shm_id);
 static int createBinarySemaphore(key_t sem_key);
 
 static int readQueueLengthFromFifo(void);
 
 static void deleteSharedMemory(int shm_id);
 static void deleteResources(int shm_id, int sem_id);
+
+static void semLock(int sem_id, int shm_id);
+static void semUnlock(int sem_id, int shm_id);
+
+static void handleGame(int shm_id, char *shm_addr, int sem_id, int queue_size);
 
 /********************************/
 
@@ -187,10 +196,9 @@ static void writePidToFifo(void)
     }
 }
 
-static void createSharedMemory(const char *key_file_name, key_t *key, int *shm_id)
+char *createSharedMemory(const char *key_file_name, key_t *key, int *shm_id)
 {
     const unsigned char KEY_CHAR = 'H';
-    const unsigned int SHM_SIZE_IN_BYTES = 1024;
 
     char *p_shm_data = NULL;
 
@@ -224,6 +232,8 @@ static void createSharedMemory(const char *key_file_name, key_t *key, int *shm_i
         write(STDERR_FILENO, SHMAT_ERROR, sizeof(SHMAT_ERROR));
         exit(EXIT_ERROR_CODE);      
     }
+
+    return p_shm_data;
 }
 
 static int createBinarySemaphore(key_t sem_key)
@@ -308,6 +318,77 @@ static void deleteResources(int shm_id, int sem_id)
         exit(EXIT_ERROR_CODE);
     }
 }
+
+static void semLock(int sem_id, int shm_id)
+{
+    struct sembuf sem_opt;
+
+    sem_opt.sem_num = 0;
+    sem_opt.sem_flg = 0;
+
+    // Lock!
+    sem_opt.sem_op = -1;
+
+    if(semop(sem_id, &sem_opt, NUM_OF_SEMAPHORES) < 0)
+    {
+        deleteResources(shm_id, sem_id);
+        // No checking needed, exits with error code.
+        write(STDERR_FILENO, SEMOP_ERROR, sizeof(SEMOP_ERROR));
+        exit(EXIT_ERROR_CODE);
+    }
+}
+
+static void semUnlock(int sem_id, int shm_id)
+{
+    struct sembuf sem_opt;
+
+    sem_opt.sem_num = 0;
+    sem_opt.sem_flg = 0;
+
+    // Unlock!
+    sem_opt.sem_op = 1;
+
+    if(semop(sem_id, &sem_opt, NUM_OF_SEMAPHORES) < 0)
+    {
+        deleteResources(shm_id, sem_id);
+        // No checking needed, exits with error code.
+        write(STDERR_FILENO, SEMOP_ERROR, sizeof(SEMOP_ERROR));
+        exit(EXIT_ERROR_CODE);
+    }
+}
+
+static void handleGame(int shm_id, char *shm_addr, int sem_id, int queue_size)
+{
+    char game_ended = 0;
+
+    char old_image[SHM_SIZE_IN_BYTES] = {0};
+    char current_image[SHM_SIZE_IN_BYTES] = {0};
+
+    while(!game_ended)
+    {
+        semLock(sem_id, shm_id);
+
+        // Read the shared memory data.
+        memcpy((void *)current_image, (void *)shm_addr, SHM_SIZE_IN_BYTES);
+
+        // If there's nothing new, continue.
+        if(0 == memcmp((void *)current_image, (void *)old_image, SHM_SIZE_IN_BYTES))
+        {
+            semUnlock(sem_id, shm_id);
+            continue;
+        }
+
+        // Otherwise, fetch the data.
+        printf("%s", current_image);
+        fflush(stdout);
+
+        // Update the old image.
+        memcpy((void *)old_image, (void *)current_image, SHM_SIZE_IN_BYTES);
+
+        semUnlock(sem_id, shm_id);
+    }
+}
+
 /********************************/
 
 // Main:
@@ -318,6 +399,7 @@ int main(int argc, char *argv[])
     const unsigned int KEY_FILE_ARG_INDEX = 1;
 
     key_t key = 0;
+    char *shm_addr = NULL;
     int queue_length = 0, shm_id = 0, sem_id = 0;
 
     initSigactions();
@@ -345,7 +427,7 @@ int main(int argc, char *argv[])
     printf("got signal from %d!\n", Queue_Pid);
 
     // Create shared memory.
-    createSharedMemory(argv[KEY_FILE_ARG_INDEX], &key, &shm_id);
+    shm_addr = createSharedMemory(argv[KEY_FILE_ARG_INDEX], &key, &shm_id);
 
     // Create semaphore.
     sem_id = createBinarySemaphore(key);
@@ -367,9 +449,8 @@ int main(int argc, char *argv[])
     deleteFifo();
 
     // Game Started!
+    handleGame(shm_id, shm_addr, sem_id, queue_length);
 
     deleteResources(shm_id, sem_id);
-
-
     return EXIT_OK_CODE;
 }
