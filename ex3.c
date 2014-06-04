@@ -19,6 +19,7 @@
 #include <sys/shm.h>
 #include <sys/sem.h>
 #include <string.h>
+#include <time.h>
 
 /********************************/
 
@@ -96,7 +97,9 @@ static void deleteResources(int shm_id, int sem_id);
 static void semLock(int sem_id, int shm_id);
 static void semUnlock(int sem_id, int shm_id);
 
-static void handleGame(int shm_id, char *shm_addr, int sem_id, int queue_size);
+static char decideToAccept(void);
+static void handleGame(int shm_id, char *shm_addr, int sem_id, int queue_size, \
+                       int *p_job_number, int *p_rel_prio, int *p_real_prio);
 
 /********************************/
 
@@ -351,8 +354,17 @@ static void semUnlock(int sem_id, int shm_id)
     }
 }
 
-static void handleGame(int shm_id, char *shm_addr, int sem_id, int queue_size)
+static char decideToAccept(void)
 {
+    // Decides randomly whether to accept or not [1 - accept, 0 - reject].
+    return (rand() % 2);
+}
+
+static void handleGame(int shm_id, char *shm_addr, int sem_id, int queue_size, \
+                       int *p_job_number, int *p_rel_prio, int *p_real_prio)
+{
+    const char SEPERATOR[] = ":";
+    char accept_flag = 0;
     unsigned int game_counter = 0;
 
     char old_image[SHM_SIZE_IN_BYTES] = {0};
@@ -363,6 +375,7 @@ static void handleGame(int shm_id, char *shm_addr, int sem_id, int queue_size)
     while(1)
     {
         const char REJECT[] = "reject";
+        const char ACCEPT[] = "accept";
 
         semLock(sem_id, shm_id);
 
@@ -378,19 +391,41 @@ static void handleGame(int shm_id, char *shm_addr, int sem_id, int queue_size)
 
         printf("current: %s\n", current_image);
 
-        memcpy(current_image, REJECT, sizeof(REJECT));
+        if(accept_flag)
+        {
+            // Points to 'real_priority:'
+            strtok(current_image, SEPERATOR);
 
-        // write to memory
-        memcpy((void *)shm_addr, (void *)current_image, SHM_SIZE_IN_BYTES);
+            // Points to the real priority value.
+            *p_real_prio = atoi(strtok(NULL, SEPERATOR));  
 
-        semUnlock(sem_id, shm_id);
+            printf("real prio: %d\n", *p_real_prio);
+
+            semUnlock(sem_id, shm_id);       
+            break;
+        }
 
         game_counter++;
 
-        if(game_counter > 10)
+        if(decideToAccept() || game_counter >= queue_size)
         {
-            break;
+            *p_job_number = atoi(strtok(current_image, SEPERATOR));
+            *p_rel_prio = atoi(strtok(NULL, SEPERATOR));
+            printf("Chose! job number: %d relative prio: %d\n", *p_job_number, *p_rel_prio);
+
+            memcpy(current_image, ACCEPT, sizeof(ACCEPT));
+            accept_flag = 1;
         }
+
+        else
+        {
+            memcpy(current_image, REJECT, sizeof(REJECT));
+        }
+
+        // write the image to memory
+        memcpy((void *)shm_addr, (void *)current_image, SHM_SIZE_IN_BYTES);
+
+        semUnlock(sem_id, shm_id);
 
         // Update the old image.
         memcpy((void *)old_image, (void *)shm_addr, SHM_SIZE_IN_BYTES);
@@ -410,8 +445,12 @@ int main(int argc, char *argv[])
     key_t key = 0;
     char *shm_addr = NULL;
     int queue_length = 0, shm_id = 0, sem_id = 0;
+    int job_prio = 0, rel_prio = 0, real_prio = 0;
 
     initSigactions();
+
+    // Initialize the rand() seed.
+    srand(time(NULL));
 
     if(argc != EXPECTED_ARGC)
     {
@@ -469,7 +508,8 @@ int main(int argc, char *argv[])
     deleteFifo();
 
     // Game Started!
-    handleGame(shm_id, shm_addr, sem_id, queue_length);
+    handleGame(shm_id, shm_addr, sem_id, queue_length, &job_prio, \
+               &rel_prio, &real_prio);
 
     deleteResources(shm_id, sem_id);
     return EXIT_OK_CODE;
