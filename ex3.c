@@ -26,6 +26,7 @@
 // Defines:
 
 #define FIFO_NAME           ("ex3FIFO")
+#define CSV_FILE_PATH       ("results.csv")
 
 #define ALLOW_READ_WRITE_TO_ALL (0666)
 
@@ -35,6 +36,8 @@
 
 #define NUM_OF_SEMAPHORES   (1)
 #define SEM_INIT            (1)
+
+#define MAX_DIGITS_IN_INT   (20)
 
 #define NOF_INPUTS_ERROR    ("wrong number of inputs.\n")
 #define OPEN_ERROR          ("open() failed.\n")
@@ -100,6 +103,8 @@ static void semUnlock(int sem_id, int shm_id);
 static char decideToAccept(void);
 static void handleGame(int shm_id, char *shm_addr, int sem_id, int queue_size, \
                        int *p_job_number, int *p_rel_prio, int *p_real_prio);
+
+static void writeIntWithEnding(int file_fd, int number, const char *ending);
 
 /********************************/
 
@@ -432,6 +437,31 @@ static void handleGame(int shm_id, char *shm_addr, int sem_id, int queue_size, \
     }
 }
 
+static void writeIntWithEnding(int file_fd, int number, const char *ending)
+{
+    char int_to_char_converter[MAX_DIGITS_IN_INT + 1] = {0};
+
+    memset(int_to_char_converter, 0, sizeof(int_to_char_converter));
+    sprintf(int_to_char_converter, "%d", number);
+
+    int str_len = strlen(int_to_char_converter);
+    int ending_len = strlen(ending);
+
+    if(write(file_fd, int_to_char_converter, str_len) !=  str_len)
+    {
+        // No checking needed, exits with error code.
+        write(STDERR_FILENO, WRITE_ERROR, sizeof(WRITE_ERROR) - 1);
+        exit(EXIT_ERROR_CODE); 
+    }
+
+    if(write(file_fd, ending, strlen(ending)) != ending_len)
+    {
+        // No checking needed, exits with error code.
+        write(STDERR_FILENO, WRITE_ERROR, sizeof(WRITE_ERROR) - 1);
+        exit(EXIT_ERROR_CODE); 
+    }
+}
+
 /********************************/
 
 // Main:
@@ -442,10 +472,13 @@ int main(int argc, char *argv[])
     const unsigned int KEY_FILE_ARG_INDEX = 1;
     const unsigned char KEY_CHAR = 'H';
 
+    const char ENDLINE[] = "\n";
+    const char SEPERATOR[] = ",";
+
     key_t key = 0;
     char *shm_addr = NULL;
-    int queue_length = 0, shm_id = 0, sem_id = 0;
-    int job_prio = 0, rel_prio = 0, real_prio = 0;
+    int csv_fd = 0, queue_length = 0, shm_id = 0, sem_id = 0;
+    int job_number = 0, rel_prio = 0, real_prio = 0;
 
     initSigactions();
 
@@ -508,9 +541,25 @@ int main(int argc, char *argv[])
     deleteFifo();
 
     // Game Started!
-    handleGame(shm_id, shm_addr, sem_id, queue_length, &job_prio, \
+    handleGame(shm_id, shm_addr, sem_id, queue_length, &job_number, \
                &rel_prio, &real_prio);
 
     deleteResources(shm_id, sem_id);
+
+    // Write results
+    csv_fd = open(CSV_FILE_PATH, O_CREAT | O_APPEND | O_RDWR, ALLOW_READ_WRITE_TO_ALL);
+    if(csv_fd < 0)
+    {
+        // No checking needed, exits with error code.
+        write(STDERR_FILENO, OPEN_ERROR, sizeof(OPEN_ERROR) - 1);
+        exit(EXIT_ERROR_CODE); 
+    }
+
+
+    writeIntWithEnding(csv_fd, queue_length, SEPERATOR);
+    writeIntWithEnding(csv_fd, job_number, SEPERATOR);
+    writeIntWithEnding(csv_fd, rel_prio, SEPERATOR);
+    writeIntWithEnding(csv_fd, real_prio, ENDLINE);
+
     return EXIT_OK_CODE;
 }
